@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vm-manager
+  labels:
+    app.kubernetes.io/name: vm-manager
+    app.kubernetes.io/component: system

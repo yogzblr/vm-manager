@@ -1,0 +1,68 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vm-manager-dev
+
+resources:
+  - ../../base
+
+nameSuffix: -dev
+
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: control-plane
+  - patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 3
+    target:
+      kind: HorizontalPodAutoscaler
+      name: control-plane
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: piko
+
+configMapGenerator:
+  - name: control-plane-config
+    behavior: merge
+    literals:
+      - |
+        config.yaml=
+        server:
+          host: "0.0.0.0"
+          port: 8080
+          debug: true
+        database:
+          host: "mysql-dev"
+          port: 3306
+          user: "vmmanager"
+          name: "vmmanager_dev"
+          max_open_conns: 10
+          max_idle_conns: 5
+        auth:
+          issuer: "vm-manager-dev"
+          token_expiry: "72h"
+        logging:
+          level: "debug"
+          development: true
+        quickwit:
+          enabled: false
+
+secretGenerator:
+  - name: control-plane-secrets
+    behavior: merge
+    literals:
+      - database-password=devpassword
+      - jwt-secret=dev-jwt-secret-not-for-production-use
