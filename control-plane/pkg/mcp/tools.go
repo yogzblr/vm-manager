@@ -19,6 +19,12 @@ func GetToolDefinitions() []Tool {
 		getCampaignProgressTool(),
 		searchAuditLogsTool(),
 		generateWorkflowTool(),
+		// Template management tools (Salt Stack-like)
+		listTemplatesTool(),
+		getTemplateTool(),
+		createTemplateTool(),
+		updateTemplateTool(),
+		generateTemplateWorkflowTool(),
 	}
 }
 
@@ -444,6 +450,212 @@ func generateWorkflowTool() Tool {
 				},
 			},
 			"required": []string{"description"},
+		},
+	}
+}
+
+// Template management tools (Salt Stack-like)
+
+func listTemplatesTool() Tool {
+	return Tool{
+		Name:        "list_templates",
+		Description: "List all configuration templates for a tenant. Templates are Jinja2-compatible files used for generating configuration files (like Salt Stack templates).",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"tenant_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The tenant ID",
+				},
+				"status": map[string]interface{}{
+					"type":        "string",
+					"description": "Filter by template status",
+					"enum":        []string{"draft", "active", "deprecated"},
+				},
+				"tags": map[string]interface{}{
+					"type":        "object",
+					"description": "Filter by tags (key-value pairs)",
+					"additionalProperties": map[string]interface{}{
+						"type": "string",
+					},
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of templates to return",
+					"default":     50,
+				},
+				"offset": map[string]interface{}{
+					"type":        "integer",
+					"description": "Offset for pagination",
+					"default":     0,
+				},
+			},
+			"required": []string{"tenant_id"},
+		},
+	}
+}
+
+func getTemplateTool() Tool {
+	return Tool{
+		Name:        "get_template",
+		Description: "Get detailed information about a specific template including its content and version history",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"tenant_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The tenant ID",
+				},
+				"template_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The template ID",
+				},
+				"include_content": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Whether to include the full template content",
+					"default":     true,
+				},
+			},
+			"required": []string{"tenant_id", "template_id"},
+		},
+	}
+}
+
+func createTemplateTool() Tool {
+	return Tool{
+		Name:        "create_template",
+		Description: "Create a new configuration template. Templates use Jinja2 syntax for variable interpolation (e.g., {{ domain }}, {% if condition %}...{% endif %}).",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"tenant_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The tenant ID",
+				},
+				"name": map[string]interface{}{
+					"type":        "string",
+					"description": "Template name (e.g., 'apache-vhost', 'nginx-config')",
+				},
+				"description": map[string]interface{}{
+					"type":        "string",
+					"description": "Description of what this template is for",
+				},
+				"content": map[string]interface{}{
+					"type":        "string",
+					"description": "The template content using Jinja2 syntax",
+				},
+				"content_type": map[string]interface{}{
+					"type":        "string",
+					"description": "MIME type of the template content",
+					"default":     "text/plain",
+				},
+				"tags": map[string]interface{}{
+					"type":        "object",
+					"description": "Tags for organizing templates (e.g., {\"service\": \"apache\", \"type\": \"config\"})",
+					"additionalProperties": map[string]interface{}{
+						"type": "string",
+					},
+				},
+			},
+			"required": []string{"tenant_id", "name", "content"},
+		},
+	}
+}
+
+func updateTemplateTool() Tool {
+	return Tool{
+		Name:        "update_template",
+		Description: "Update an existing template. Creates a new version when content is changed.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"tenant_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The tenant ID",
+				},
+				"template_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The template ID to update",
+				},
+				"name": map[string]interface{}{
+					"type":        "string",
+					"description": "New template name",
+				},
+				"description": map[string]interface{}{
+					"type":        "string",
+					"description": "New description",
+				},
+				"content": map[string]interface{}{
+					"type":        "string",
+					"description": "New template content",
+				},
+				"status": map[string]interface{}{
+					"type":        "string",
+					"description": "New status",
+					"enum":        []string{"draft", "active", "deprecated"},
+				},
+				"change_note": map[string]interface{}{
+					"type":        "string",
+					"description": "Note describing what changed in this version",
+				},
+			},
+			"required": []string{"tenant_id", "template_id"},
+		},
+	}
+}
+
+func generateTemplateWorkflowTool() Tool {
+	return Tool{
+		Name:        "generate_template_workflow",
+		Description: "Generate a workflow that deploys a template to target agents. This creates a Salt Stack-like deployment workflow with template rendering and file deployment.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"tenant_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The tenant ID",
+				},
+				"template_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The template ID to deploy",
+				},
+				"destination_path": map[string]interface{}{
+					"type":        "string",
+					"description": "Destination path on target agents (supports Jinja2 variables)",
+				},
+				"variables": map[string]interface{}{
+					"type":        "object",
+					"description": "Variables to pass to the template (like Salt Pillar data)",
+					"additionalProperties": true,
+				},
+				"file_mode": map[string]interface{}{
+					"type":        "string",
+					"description": "File permissions (e.g., '0644')",
+					"default":     "0644",
+				},
+				"file_owner": map[string]interface{}{
+					"type":        "string",
+					"description": "File owner (username or UID)",
+				},
+				"file_group": map[string]interface{}{
+					"type":        "string",
+					"description": "File group (group name or GID)",
+				},
+				"backup": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Create backup before overwriting existing file",
+					"default":     true,
+				},
+				"service_restart": map[string]interface{}{
+					"type":        "string",
+					"description": "Service to restart after deployment (e.g., 'apache2', 'nginx')",
+				},
+				"validate_command": map[string]interface{}{
+					"type":        "string",
+					"description": "Command to validate the generated config before applying (e.g., 'nginx -t')",
+				},
+			},
+			"required": []string{"tenant_id", "template_id", "destination_path"},
 		},
 	}
 }

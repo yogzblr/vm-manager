@@ -15,6 +15,7 @@ import (
 	"github.com/yourorg/control-plane/pkg/audit"
 	"github.com/yourorg/control-plane/pkg/auth"
 	"github.com/yourorg/control-plane/pkg/campaign"
+	"github.com/yourorg/control-plane/pkg/template"
 	"github.com/yourorg/control-plane/pkg/tenant"
 	"github.com/yourorg/control-plane/pkg/workflow"
 )
@@ -63,6 +64,7 @@ type Dependencies struct {
 	AgentRegistrar  *agent.Registrar
 	WorkflowManager *workflow.Manager
 	CampaignManager *campaign.Manager
+	TemplateManager *template.Manager
 	AuditLogger     *audit.Logger
 }
 
@@ -87,6 +89,7 @@ func NewServer(config *ServerConfig, deps *Dependencies) *Server {
 		deps.AgentRegistrar,
 		deps.WorkflowManager,
 		deps.CampaignManager,
+		deps.TemplateManager,
 		deps.AuditLogger,
 	)
 
@@ -171,6 +174,19 @@ func (s *Server) setupRoutes() {
 			campaigns.POST("/:campaign_id/pause", s.handlers.PauseCampaign)
 			campaigns.POST("/:campaign_id/cancel", s.handlers.CancelCampaign)
 			campaigns.GET("/:campaign_id/progress", s.handlers.GetCampaignProgress)
+		}
+
+		// Template routes (Salt Stack-like template management)
+		templates := authenticated.Group("/templates")
+		{
+			templates.GET("", s.handlers.ListTemplates)
+			templates.POST("", s.handlers.CreateTemplate)
+			templates.GET("/:template_id", s.handlers.GetTemplate)
+			templates.GET("/:template_id/content", s.handlers.GetTemplateContent)
+			templates.PUT("/:template_id", s.handlers.UpdateTemplate)
+			templates.DELETE("/:template_id", s.handlers.DeleteTemplate)
+			templates.GET("/:template_id/versions", s.handlers.GetTemplateVersions)
+			templates.POST("/:template_id/activate", s.handlers.ActivateTemplate)
 		}
 	}
 }

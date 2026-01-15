@@ -13,6 +13,7 @@ import (
 	"github.com/yourorg/control-plane/pkg/auth"
 	"github.com/yourorg/control-plane/pkg/campaign"
 	"github.com/yourorg/control-plane/pkg/db/models"
+	"github.com/yourorg/control-plane/pkg/template"
 	"github.com/yourorg/control-plane/pkg/tenant"
 	"github.com/yourorg/control-plane/pkg/workflow"
 )
@@ -25,6 +26,7 @@ type Handlers struct {
 	agentRegistrar  *agent.Registrar
 	workflowManager *workflow.Manager
 	campaignManager *campaign.Manager
+	templateManager *template.Manager
 	auditLogger     *audit.Logger
 }
 
@@ -36,6 +38,7 @@ func NewHandlers(
 	agentRegistrar *agent.Registrar,
 	workflowManager *workflow.Manager,
 	campaignManager *campaign.Manager,
+	templateManager *template.Manager,
 	auditLogger *audit.Logger,
 ) *Handlers {
 	return &Handlers{
@@ -45,6 +48,7 @@ func NewHandlers(
 		agentRegistrar:  agentRegistrar,
 		workflowManager: workflowManager,
 		campaignManager: campaignManager,
+		templateManager: templateManager,
 		auditLogger:     auditLogger,
 	}
 }
@@ -472,6 +476,173 @@ func (h *Handlers) GetCampaignProgress(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, progress)
+}
+
+// Template handlers
+
+// ListTemplates lists templates for a tenant
+func (h *Handlers) ListTemplates(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := getTenantID(c)
+	status := models.TemplateStatus(c.Query("status"))
+	limit := getIntParam(c, "limit", 50)
+	offset := getIntParam(c, "offset", 0)
+
+	templates, total, err := h.templateManager.List(ctx, &template.ListTemplatesRequest{
+		TenantID: tenantID,
+		Status:   status,
+		Limit:    limit,
+		Offset:   offset,
+	})
+	if err != nil {
+		h.logger.Error("failed to list templates", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"templates": templates,
+		"total":     total,
+		"limit":     limit,
+		"offset":    offset,
+	})
+}
+
+// GetTemplate gets a template by ID
+func (h *Handlers) GetTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := getTenantID(c)
+	templateID := c.Param("template_id")
+
+	tpl, err := h.templateManager.Get(ctx, tenantID, templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, tpl)
+}
+
+// GetTemplateContent gets raw template content (for agents to fetch)
+func (h *Handlers) GetTemplateContent(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := getTenantID(c)
+	templateID := c.Param("template_id")
+
+	content, err := h.templateManager.GetContent(ctx, tenantID, templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Return raw content with appropriate content type
+	tpl, _ := h.templateManager.Get(ctx, tenantID, templateID)
+	contentType := "text/plain"
+	if tpl != nil && tpl.ContentType != "" {
+		contentType = tpl.ContentType
+	}
+
+	c.Data(http.StatusOK, contentType, []byte(content))
+}
+
+// CreateTemplate creates a new template
+func (h *Handlers) CreateTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := getTenantID(c)
+
+	var req template.CreateTemplateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.TenantID = tenantID
+
+	// Get created by from auth context
+	if claims, ok := c.Get("claims"); ok {
+		if authClaims, ok := claims.(*auth.Claims); ok {
+			req.CreatedBy = authClaims.UserID
+		}
+	}
+
+	tpl, err := h.templateManager.Create(ctx, &req)
+	if err != nil {
+		h.logger.Error("failed to create template", zap.Error(err))
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, tpl)
+}
+
+// UpdateTemplate updates a template
+func (h *Handlers) UpdateTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := getTenantID(c)
+	templateID := c.Param("template_id")
+
+	var req template.UpdateTemplateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get changed by from auth context
+	if claims, ok := c.Get("claims"); ok {
+		if authClaims, ok := claims.(*auth.Claims); ok {
+			req.ChangedBy = authClaims.UserID
+		}
+	}
+
+	tpl, err := h.templateManager.Update(ctx, tenantID, templateID, &req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, tpl)
+}
+
+// DeleteTemplate deletes a template
+func (h *Handlers) DeleteTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := getTenantID(c)
+	templateID := c.Param("template_id")
+
+	if err := h.templateManager.Delete(ctx, tenantID, templateID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "template deleted"})
+}
+
+// GetTemplateVersions gets all versions of a template
+func (h *Handlers) GetTemplateVersions(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := getTenantID(c)
+	templateID := c.Param("template_id")
+
+	versions, err := h.templateManager.GetVersions(ctx, tenantID, templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"versions": versions})
+}
+
+// ActivateTemplate activates a template
+func (h *Handlers) ActivateTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := getTenantID(c)
+	templateID := c.Param("template_id")
+
+	if err := h.templateManager.Activate(ctx, tenantID, templateID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "template activated"})
 }
 
 // Helper functions
