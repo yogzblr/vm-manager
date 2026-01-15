@@ -43,16 +43,25 @@ type Step struct {
 }
 
 // TemplateConfig contains configuration for template steps
+// Cross-platform notes:
+//   - Mode: Unix octal (e.g., "0644") - on Windows, mapped to ACLs
+//   - Owner: username/UID (Unix) or username/SID (Windows)
+//   - Group: group name/GID (Unix only, ignored on Windows)
 type TemplateConfig struct {
 	// Source is the template source (HTTP URL or control-plane://templates/{id})
 	Source string `yaml:"source" json:"source"`
 	// Dest is the destination path (supports variable interpolation)
 	Dest string `yaml:"dest" json:"dest"`
-	// Mode is the file permissions (e.g., "0644")
+	// Mode is the file permissions in Unix octal format (e.g., "0644", "0755")
+	// On Windows: mapped to ACLs - owner gets user bits, Everyone gets other bits
+	// Example: "0644" → owner: read+write, Everyone: read
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
-	// Owner is the file owner (username or UID)
+	// Owner is the file owner
+	// Unix: username or numeric UID
+	// Windows: username or SID string (e.g., "S-1-5-21-...")
 	Owner string `yaml:"owner,omitempty" json:"owner,omitempty"`
-	// Group is the file group (group name or GID)
+	// Group is the file group (Unix only, ignored on Windows)
+	// Unix: group name or numeric GID
 	Group string `yaml:"group,omitempty" json:"group,omitempty"`
 	// Backup enables creating a backup before overwriting
 	Backup bool `yaml:"backup,omitempty" json:"backup,omitempty"`

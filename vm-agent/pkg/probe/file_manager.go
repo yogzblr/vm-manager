@@ -7,11 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -33,7 +31,7 @@ type FileManagerConfig struct {
 func NewFileManager(cfg *FileManagerConfig) *FileManager {
 	backupDir := cfg.BackupDir
 	if backupDir == "" {
-		backupDir = "/var/lib/vm-agent/backups"
+		backupDir = getDefaultBackupDir()
 	}
 
 	return &FileManager{
@@ -84,11 +82,11 @@ type DeployOptions struct {
 	Dest string
 	// Content is the content to write
 	Content string
-	// Mode is the file permissions (e.g., "0644")
+	// Mode is the file permissions (e.g., "0644" on Unix, or "readonly" on Windows)
 	Mode string
-	// Owner is the file owner (username or UID)
+	// Owner is the file owner (username or UID on Unix, username or SID on Windows)
 	Owner string
-	// Group is the file group (group name or GID)
+	// Group is the file group (group name or GID on Unix, ignored on Windows)
 	Group string
 	// Backup enables creating a backup before overwriting
 	Backup bool
@@ -198,45 +196,11 @@ func (m *FileManager) Deploy(opts *DeployOptions) *DeployResult {
 	}
 	tempFile.Close()
 
-	// Set file mode
-	fileMode := os.FileMode(0644)
-	if opts.Mode != "" {
-		if parsed, err := strconv.ParseUint(opts.Mode, 8, 32); err == nil {
-			fileMode = os.FileMode(parsed)
-		}
-	}
-	if err := os.Chmod(tempPath, fileMode); err != nil {
-		os.Remove(tempPath)
-		result.Error = fmt.Sprintf("failed to set file mode: %v", err)
-		result.Status = "error"
-		return result
-	}
-
-	// Set owner and group
-	if opts.Owner != "" || opts.Group != "" {
-		uid, gid := -1, -1
-
-		if opts.Owner != "" {
-			if u, err := user.Lookup(opts.Owner); err == nil {
-				uid, _ = strconv.Atoi(u.Uid)
-			} else if parsed, err := strconv.Atoi(opts.Owner); err == nil {
-				uid = parsed
-			}
-		}
-
-		if opts.Group != "" {
-			if g, err := user.LookupGroup(opts.Group); err == nil {
-				gid, _ = strconv.Atoi(g.Gid)
-			} else if parsed, err := strconv.Atoi(opts.Group); err == nil {
-				gid = parsed
-			}
-		}
-
-		if uid != -1 || gid != -1 {
-			if err := os.Chown(tempPath, uid, gid); err != nil {
-				// Non-fatal, log but continue
-				result.Error = fmt.Sprintf("warning: failed to set ownership: %v", err)
-			}
+	// Set file permissions (platform-specific)
+	if err := setFilePermissions(tempPath, opts.Mode, opts.Owner, opts.Group); err != nil {
+		// Non-fatal for permissions, continue with warning
+		if result.Error == "" {
+			result.Error = fmt.Sprintf("warning: %v", err)
 		}
 	}
 
@@ -273,18 +237,8 @@ func (m *FileManager) GetFileInfo(path string) (*FileInfo, error) {
 	info.IsDir = stat.IsDir()
 	info.IsSymlink = stat.Mode()&os.ModeSymlink != 0
 
-	// Get owner/group info (Linux-specific)
-	if sys, ok := stat.Sys().(*syscall.Stat_t); ok {
-		info.OwnerUID = int(sys.Uid)
-		info.GroupGID = int(sys.Gid)
-
-		if u, err := user.LookupId(strconv.Itoa(info.OwnerUID)); err == nil {
-			info.Owner = u.Username
-		}
-		if g, err := user.LookupGroupId(strconv.Itoa(info.GroupGID)); err == nil {
-			info.Group = g.Name
-		}
-	}
+	// Get platform-specific owner/group info
+	getFileOwnership(stat, info)
 
 	// Calculate hash for regular files
 	if !info.IsDir && !info.IsSymlink {
@@ -435,4 +389,16 @@ func generateDiff(filename, old, new string) string {
 	}
 
 	return diff.String()
+}
+
+// ParseUnixMode parses a Unix-style mode string (e.g., "0644") to os.FileMode
+func ParseUnixMode(mode string) (os.FileMode, error) {
+	if mode == "" {
+		return 0644, nil
+	}
+	parsed, err := strconv.ParseUint(mode, 8, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid mode: %s", mode)
+	}
+	return os.FileMode(parsed), nil
 }
