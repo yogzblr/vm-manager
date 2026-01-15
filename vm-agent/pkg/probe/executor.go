@@ -19,19 +19,25 @@ import (
 
 // Executor executes workflows
 type Executor struct {
-	mu           sync.RWMutex
-	workDir      string
-	maxConcurrent int
-	activeJobs   int32
-	jobs         map[string]*Job
-	logger       *zap.Logger
-	semaphore    chan struct{}
+	mu               sync.RWMutex
+	workDir          string
+	maxConcurrent    int
+	activeJobs       int32
+	jobs             map[string]*Job
+	logger           *zap.Logger
+	semaphore        chan struct{}
+	templateFetcher  *TemplateFetcher
+	templateRenderer *TemplateRenderer
+	fileManager      *FileManager
 }
 
 // ExecutorConfig contains executor configuration
 type ExecutorConfig struct {
-	WorkDir       string
-	MaxConcurrent int
+	WorkDir          string
+	MaxConcurrent    int
+	ControlPlaneURL  string // URL for control plane template fetching
+	ControlPlaneAuth string // Auth token for control plane
+	BackupDir        string // Directory for file backups
 }
 
 // Job represents a running workflow job
@@ -58,12 +64,31 @@ func NewExecutor(cfg *ExecutorConfig, logger *zap.Logger) (*Executor, error) {
 		maxConcurrent = 5
 	}
 
+	// Initialize template components
+	templateFetcher := NewTemplateFetcher(&TemplateFetcherConfig{
+		ControlPlaneURL:  cfg.ControlPlaneURL,
+		ControlPlaneAuth: cfg.ControlPlaneAuth,
+	})
+
+	templateRenderer := NewTemplateRenderer()
+
+	backupDir := cfg.BackupDir
+	if backupDir == "" {
+		backupDir = filepath.Join(cfg.WorkDir, "backups")
+	}
+	fileManager := NewFileManager(&FileManagerConfig{
+		BackupDir: backupDir,
+	})
+
 	return &Executor{
-		workDir:       cfg.WorkDir,
-		maxConcurrent: maxConcurrent,
-		jobs:          make(map[string]*Job),
-		logger:        logger,
-		semaphore:     make(chan struct{}, maxConcurrent),
+		workDir:          cfg.WorkDir,
+		maxConcurrent:    maxConcurrent,
+		jobs:             make(map[string]*Job),
+		logger:           logger,
+		semaphore:        make(chan struct{}, maxConcurrent),
+		templateFetcher:  templateFetcher,
+		templateRenderer: templateRenderer,
+		fileManager:      fileManager,
 	}, nil
 }
 
@@ -234,6 +259,8 @@ func (e *Executor) executeStep(ctx context.Context, job *Job, step *Step) *StepR
 			output, exitCode, err = e.executeCommand(stepCtx, step, job)
 		case StepTypeScript:
 			output, exitCode, err = e.executeScript(stepCtx, step, job)
+		case StepTypeTemplate:
+			output, exitCode, err = e.executeTemplate(stepCtx, step, job)
 		default:
 			err = fmt.Errorf("unsupported step type: %s", step.Type)
 			exitCode = 1
@@ -339,6 +366,95 @@ func (e *Executor) executeScript(ctx context.Context, step *Step, job *Job) (str
 	// Execute the script
 	step.Args = []string{"sh", scriptPath}
 	return e.executeCommand(ctx, step, job)
+}
+
+// executeTemplate executes a template step (Salt Stack-like template deployment)
+func (e *Executor) executeTemplate(ctx context.Context, step *Step, job *Job) (string, int, error) {
+	if step.Template == nil {
+		return "", 1, fmt.Errorf("template configuration is required")
+	}
+
+	var outputBuilder bytes.Buffer
+
+	// Build render context from workflow vars
+	renderCtx := NewRenderContext().
+		WithVars(job.Workflow.Vars).
+		WithEnv(job.Workflow.Env).
+		WithSystemFacts()
+
+	// Add step-specific env vars
+	renderCtx.WithEnv(step.Env)
+
+	e.logger.Info("executing template step",
+		zap.String("step_id", step.ID),
+		zap.String("source", step.Template.Source),
+		zap.String("dest", step.Template.Dest))
+
+	// 1. Render the destination path (it may contain variables)
+	destPath, err := e.templateRenderer.RenderString(step.Template.Dest, renderCtx)
+	if err != nil {
+		return "", 1, fmt.Errorf("failed to render destination path: %w", err)
+	}
+	outputBuilder.WriteString(fmt.Sprintf("Destination: %s\n", destPath))
+
+	// 2. Fetch the template
+	outputBuilder.WriteString(fmt.Sprintf("Fetching template from: %s\n", step.Template.Source))
+	fetchResult, err := e.templateFetcher.Fetch(ctx, step.Template.Source)
+	if err != nil {
+		return outputBuilder.String(), 1, fmt.Errorf("failed to fetch template: %w", err)
+	}
+	outputBuilder.WriteString(fmt.Sprintf("Template fetched successfully (%d bytes)\n", len(fetchResult.Content)))
+
+	// 3. Render the template with variables
+	outputBuilder.WriteString("Rendering template with variables...\n")
+	renderResult, err := e.templateRenderer.Render(fetchResult.Content, renderCtx)
+	if err != nil {
+		return outputBuilder.String(), 1, fmt.Errorf("failed to render template: %w", err)
+	}
+	outputBuilder.WriteString(fmt.Sprintf("Template rendered successfully (%d bytes)\n", len(renderResult.Content)))
+
+	// 4. Deploy the file
+	deployOpts := &DeployOptions{
+		Dest:       destPath,
+		Content:    renderResult.Content,
+		Mode:       step.Template.Mode,
+		Owner:      step.Template.Owner,
+		Group:      step.Template.Group,
+		Backup:     step.Template.Backup,
+		DiffOnly:   step.Template.DiffOnly,
+		CreateDirs: step.Template.CreateDirs,
+	}
+
+	deployResult := e.fileManager.Deploy(deployOpts)
+
+	// Build output based on deploy result
+	outputBuilder.WriteString(fmt.Sprintf("Deploy status: %s\n", deployResult.Status))
+
+	if deployResult.BackupPath != "" {
+		outputBuilder.WriteString(fmt.Sprintf("Backup created: %s\n", deployResult.BackupPath))
+	}
+
+	if deployResult.Diff != "" {
+		outputBuilder.WriteString("Changes:\n")
+		outputBuilder.WriteString(deployResult.Diff)
+	}
+
+	if deployResult.Error != "" {
+		outputBuilder.WriteString(fmt.Sprintf("Error: %s\n", deployResult.Error))
+	}
+
+	// Determine exit code based on status
+	exitCode := 0
+	if deployResult.Status == "error" {
+		exitCode = 1
+	}
+
+	e.logger.Info("template step completed",
+		zap.String("step_id", step.ID),
+		zap.String("status", deployResult.Status),
+		zap.Bool("changed", deployResult.Changed))
+
+	return outputBuilder.String(), exitCode, nil
 }
 
 // executeHooks executes workflow hooks
