@@ -1,0 +1,284 @@
+#!/bin/bash
+set -euo pipefail
+
+# VM Agent Installation Script
+# Usage: curl -sSL https://example.com/install.sh | bash -s -- --key INSTALLATION_KEY --endpoint CONTROL_PLANE_URL
+
+# Default values
+INSTALL_DIR="/usr/local/bin"
+CONFIG_DIR="/etc/vm-agent"
+DATA_DIR="/var/lib/vm-agent"
+LOG_DIR="/var/log/vm-agent"
+SERVICE_USER="vm-agent"
+BINARY_URL=""
+CONTROL_PLANE_URL=""
+INSTALLATION_KEY=""
+VERSION="latest"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --key)
+            INSTALLATION_KEY="$2"
+            shift 2
+            ;;
+        --endpoint)
+            CONTROL_PLANE_URL="$2"
+            shift 2
+            ;;
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --binary-url)
+            BINARY_URL="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "VM Agent Installation Script"
+            echo ""
+            echo "Usage: $0 --key INSTALLATION_KEY --endpoint CONTROL_PLANE_URL [options]"
+            echo ""
+            echo "Required:"
+            echo "  --key        Installation key from control plane"
+            echo "  --endpoint   Control plane URL"
+            echo ""
+            echo "Options:"
+            echo "  --version    Agent version (default: latest)"
+            echo "  --binary-url Custom binary download URL"
+            echo "  -h, --help   Show this help message"
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Validate required arguments
+if [ -z "${INSTALLATION_KEY}" ]; then
+    log_error "Installation key is required (--key)"
+    exit 1
+fi
+
+if [ -z "${CONTROL_PLANE_URL}" ]; then
+    log_error "Control plane endpoint is required (--endpoint)"
+    exit 1
+fi
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    log_error "This script must be run as root"
+    exit 1
+fi
+
+# Detect OS and architecture
+detect_platform() {
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+
+    case "${ARCH}" in
+        x86_64)
+            ARCH="amd64"
+            ;;
+        aarch64|arm64)
+            ARCH="arm64"
+            ;;
+        *)
+            log_error "Unsupported architecture: ${ARCH}"
+            exit 1
+            ;;
+    esac
+
+    case "${OS}" in
+        linux)
+            OS="linux"
+            ;;
+        darwin)
+            OS="darwin"
+            ;;
+        *)
+            log_error "Unsupported operating system: ${OS}"
+            exit 1
+            ;;
+    esac
+
+    log_info "Detected platform: ${OS}/${ARCH}"
+}
+
+# Create user and directories
+setup_directories() {
+    log_info "Setting up directories..."
+
+    # Create service user if not exists
+    if ! id "${SERVICE_USER}" &>/dev/null; then
+        useradd --system --no-create-home --shell /bin/false "${SERVICE_USER}"
+    fi
+
+    # Create directories
+    mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${LOG_DIR}"
+    chown -R "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}" "${LOG_DIR}"
+    chmod 700 "${DATA_DIR}"
+    chmod 755 "${LOG_DIR}"
+}
+
+# Download and install binary
+install_binary() {
+    log_info "Downloading vm-agent..."
+
+    if [ -z "${BINARY_URL}" ]; then
+        BINARY_URL="${CONTROL_PLANE_URL}/downloads/vm-agent-${VERSION}-${OS}-${ARCH}"
+    fi
+
+    TEMP_FILE=$(mktemp)
+    trap "rm -f ${TEMP_FILE}" EXIT
+
+    if ! curl -sSL -o "${TEMP_FILE}" "${BINARY_URL}"; then
+        log_error "Failed to download vm-agent"
+        exit 1
+    fi
+
+    # Verify checksum if available
+    CHECKSUM_URL="${BINARY_URL}.sha256"
+    if curl -sSL -o "${TEMP_FILE}.sha256" "${CHECKSUM_URL}" 2>/dev/null; then
+        log_info "Verifying checksum..."
+        EXPECTED_SUM=$(cat "${TEMP_FILE}.sha256" | awk '{print $1}')
+        ACTUAL_SUM=$(sha256sum "${TEMP_FILE}" | awk '{print $1}')
+        if [ "${EXPECTED_SUM}" != "${ACTUAL_SUM}" ]; then
+            log_error "Checksum verification failed"
+            exit 1
+        fi
+        log_info "Checksum verified"
+    else
+        log_warn "Checksum file not available, skipping verification"
+    fi
+
+    # Install binary
+    log_info "Installing vm-agent to ${INSTALL_DIR}..."
+    mv "${TEMP_FILE}" "${INSTALL_DIR}/vm-agent"
+    chmod 755 "${INSTALL_DIR}/vm-agent"
+
+    # Verify installation
+    if ! "${INSTALL_DIR}/vm-agent" version &>/dev/null; then
+        log_error "Installation verification failed"
+        exit 1
+    fi
+
+    log_info "vm-agent installed successfully"
+}
+
+# Create configuration file
+create_config() {
+    log_info "Creating configuration..."
+
+    cat > "${CONFIG_DIR}/config.yaml" <<EOF
+# VM Agent Configuration
+# Generated by installation script
+
+agent:
+  id: ""  # Will be generated on first run
+  data_dir: "${DATA_DIR}"
+
+control_plane:
+  endpoint: "${CONTROL_PLANE_URL}"
+  installation_key: "${INSTALLATION_KEY}"
+
+piko:
+  enabled: true
+
+webhook:
+  enabled: true
+  port: 8080
+
+health:
+  enabled: true
+  check_interval: 30s
+
+logging:
+  level: info
+  format: json
+  output: "${LOG_DIR}/agent.log"
+EOF
+
+    chmod 600 "${CONFIG_DIR}/config.yaml"
+    chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}/config.yaml"
+}
+
+# Install systemd service
+install_service() {
+    log_info "Installing systemd service..."
+
+    cat > /etc/systemd/system/vm-agent.service <<EOF
+[Unit]
+Description=VM Agent - Multi-Tenant VM Management Agent
+After=network.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+ExecStart=${INSTALL_DIR}/vm-agent run --config ${CONFIG_DIR}/config.yaml
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vm-agent
+
+# Security settings
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=${DATA_DIR} ${LOG_DIR}
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable vm-agent
+    systemctl start vm-agent
+
+    log_info "Service installed and started"
+}
+
+# Main installation flow
+main() {
+    log_info "Starting VM Agent installation..."
+    echo ""
+
+    detect_platform
+    setup_directories
+    install_binary
+    create_config
+    install_service
+
+    echo ""
+    log_info "=== Installation Complete ==="
+    log_info "Agent Status:"
+    systemctl status vm-agent --no-pager || true
+    echo ""
+    log_info "View logs: journalctl -u vm-agent -f"
+    log_info "Configuration: ${CONFIG_DIR}/config.yaml"
+}
+
+main

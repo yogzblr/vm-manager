@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: control-plane-config
+  namespace: vm-manager
+  labels:
+    app.kubernetes.io/name: control-plane
+    app.kubernetes.io/component: config
+data:
+  config.yaml: |
+    server:
+      host: "0.0.0.0"
+      port: 8080
+      debug: false
+
+    database:
+      host: "mysql"
+      port: 3306
+      user: "vmmanager"
+      name: "vmmanager"
+      max_open_conns: 100
+      max_idle_conns: 10
+      conn_max_lifetime: "1h"
+
+    auth:
+      issuer: "vm-manager"
+      token_expiry: "24h"
+      refresh_expiry: "168h"
+
+    logging:
+      level: "info"
+      development: false
+
+    quickwit:
+      enabled: true
+      url: "http://quickwit:7280"
+      index_id: "audit-logs"
+
+    piko:
+      endpoint: "piko.vm-manager.svc.cluster.local:8001"

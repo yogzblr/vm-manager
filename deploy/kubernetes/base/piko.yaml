@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: piko
+  namespace: vm-manager
+  labels:
+    app.kubernetes.io/name: piko
+    app.kubernetes.io/component: proxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: piko
+      app.kubernetes.io/component: proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: piko
+        app.kubernetes.io/component: proxy
+    spec:
+      containers:
+        - name: piko
+          image: ghcr.io/andydunstall/piko:latest
+          args:
+            - server
+          ports:
+            - name: proxy
+              containerPort: 8000
+              protocol: TCP
+            - name: upstream
+              containerPort: 8001
+              protocol: TCP
+            - name: admin
+              containerPort: 8002
+              protocol: TCP
+          env:
+            - name: PIKO_CLUSTER_NODE_ID_PREFIX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: piko
+  namespace: vm-manager
+  labels:
+    app.kubernetes.io/name: piko
+    app.kubernetes.io/component: proxy
+spec:
+  type: ClusterIP
+  ports:
+    - name: proxy
+      port: 8000
+      targetPort: proxy
+      protocol: TCP
+    - name: upstream
+      port: 8001
+      targetPort: upstream
+      protocol: TCP
+    - name: admin
+      port: 8002
+      targetPort: admin
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: piko
+    app.kubernetes.io/component: proxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: piko-external
+  namespace: vm-manager
+  labels:
+    app.kubernetes.io/name: piko
+    app.kubernetes.io/component: proxy
+spec:
+  type: LoadBalancer
+  ports:
+    - name: upstream
+      port: 8001
+      targetPort: upstream
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: piko
+    app.kubernetes.io/component: proxy
